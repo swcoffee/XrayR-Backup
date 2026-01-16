@@ -55,8 +55,7 @@ jobs:
             # Create GitHub Release
             gh release create "$TAG_NAME" \
               --title "$RELEASE_NAME" \
-              --notes "Daily automated build - $(date +%Y-%m-%d)" \
-              --prerelease
+              --notes "Daily automated build - $(date +%Y-%m-%d)"
           fi
 
   build:
