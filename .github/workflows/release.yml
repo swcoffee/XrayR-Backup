@@ -2,6 +2,8 @@ name: Build and Release
 
 on:
   workflow_dispatch:
+  schedule:
+    - cron: '0 5 * * *'  # Run daily at 05:00 UTC
   push:
     branches:
       - release
@@ -11,95 +13,74 @@ on:
       - "go.sum"
       - ".github/workflows/*.yml"
   pull_request:
-    types: [ opened, synchronize, reopened ]
+    types: [opened, synchronize, reopened]
     paths:
       - "**/*.go"
       - "go.mod"
       - "go.sum"
       - ".github/workflows/*.yml"
   release:
-    types: [ published ]
+    types: [published]
 
 jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    outputs:
+      tag_name: ${{ steps.create_tag.outputs.tag_name }}
+    steps:
+      - name: Checkout codebase
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Create tag and release
+        id: create_tag
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG_NAME="v0.9.4-test-$(date +%Y-%m-%d)"
+          RELEASE_NAME="XrayR v0.9.4 test-$(date +%Y-%m-%d)"
+          echo "tag_name=$TAG_NAME" >> $GITHUB_OUTPUT
+          
+          # Check if tag already exists
+          if git rev-parse "$TAG_NAME" >/dev/null 2>&1; then
+            echo "Tag $TAG_NAME already exists, skipping creation"
+          else
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git tag -a "$TAG_NAME" -m "$RELEASE_NAME"
+            git push origin "$TAG_NAME"
+            
+            # Create GitHub Release
+            gh release create "$TAG_NAME" \
+              --title "$RELEASE_NAME" \
+              --notes "Daily automated build - $(date +%Y-%m-%d)" \
+              --prerelease
+          fi
 
   build:
+    needs: [prepare]
+    if: always() && (needs.prepare.result == 'success' || needs.prepare.result == 'skipped')
     strategy:
       matrix:
-        # Include amd64 on all platforms.
-        goos: [ windows, freebsd, openbsd, linux, darwin ]
-        goarch: [ amd64, 386 ]
-        exclude:
-          # Exclude i386 on darwin.
-          - goarch: 386
-            goos: darwin
-          - goarch: 386
-            goos: openbsd
         include:
-          # BEIGIN MacOS ARM64
-          - goos: darwin
-            goarch: arm64
-          # END MacOS ARM64
-          # BEGIN Linux ARM 5 6 7
           - goos: linux
-            goarch: arm
-            goarm: 7
-          - goos: linux
-            goarch: arm
-            goarm: 6
-          - goos: linux
-            goarch: arm
-            goarm: 5
-          # END Linux ARM 5 6 7
-          # BEGIN Android ARM 8
-          - goos: android
-            goarch: arm64
-          # END Android ARM 8
-          # BEGIN Other architectures
-          # BEGIN riscv64 & ARM64
+            goarch: amd64
           - goos: linux
             goarch: arm64
-          - goos: linux
-            goarch: riscv64
-          # END riscv64 & ARM64
-          # BEGIN MIPS
-          - goos: linux
-            goarch: mips64
-          - goos: linux
-            goarch: mips64le
-          - goos: linux
-            goarch: mipsle
-          - goos: linux
-            goarch: mips
-          # END MIPS
-          # BEGIN PPC
-          # - goos: linux # Removed due to the unsupport of shirou/gopsutil 
-          #   goarch: ppc64
-          - goos: linux
-            goarch: ppc64le
-          # END PPC
-          # BEGIN FreeBSD ARM
-          - goos: freebsd
-            goarch: arm64
-          - goos: freebsd
-            goarch: arm
-            goarm: 7
-          # END FreeBSD ARM
-          # BEGIN S390X
-          - goos: linux
-            goarch: s390x
-          # END S390X
-          # END Other architectures
       fail-fast: false
 
     runs-on: ubuntu-latest
     env:
       GOOS: ${{ matrix.goos }}
       GOARCH: ${{ matrix.goarch }}
-      GOARM: ${{ matrix.goarm }}
       CGO_ENABLED: 0
+
     steps:
       - name: Checkout codebase
         uses: actions/checkout@v4
+
       - name: Show workflow information
         id: get_filename
         run: |
@@ -116,21 +97,10 @@ jobs:
       - name: Get project dependencies
         run: go mod download
 
-
       - name: Build XrayR
         run: |
           mkdir -p build_assets
           go build -v -o build_assets/XrayR -trimpath -ldflags "-s -w -buildid="
-
-      - name: Build Mips softfloat XrayR
-        if: matrix.goarch == 'mips' || matrix.goarch == 'mipsle'
-        run: |
-          GOMIPS=softfloat go build -v -o build_assets/XrayR_softfloat -trimpath -ldflags "-s -w -buildid="
-      - name: Rename Windows XrayR
-        if: matrix.goos == 'windows'
-        run: |
-          cd ./build_assets || exit 1
-          mv XrayR XrayR.exe
 
       - name: Prepare to release
         uses: nick-fields/retry@v3
@@ -155,6 +125,7 @@ jobs:
               echo -e "Downloading ${DOWNLOAD_URL}..."
               curl -L "${DOWNLOAD_URL}" -o ./build_assets/${FILE_NAME}
             done
+
       - name: Create ZIP archive
         shell: bash
         run: |
@@ -168,20 +139,23 @@ jobs:
           do
             openssl dgst -$METHOD $FILE | sed 's/([^)]*)//g' >>$DGST
           done
+
       - name: Change the name
         run: |
           mv build_assets XrayR-$ASSET_NAME
+
       - name: Upload files to Artifacts
         uses: actions/upload-artifact@v4
         with:
           name: XrayR-${{ steps.get_filename.outputs.ASSET_NAME }}
           path: |
             ./XrayR-${{ steps.get_filename.outputs.ASSET_NAME }}/*
+
       - name: Upload binaries to release
         uses: svenstaro/upload-release-action@v2
-        if: github.event_name == 'release'
+        if: github.event_name == 'release' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
         with:
           repo_token: ${{ secrets.GITHUB_TOKEN }}
           file: ./XrayR-${{ steps.get_filename.outputs.ASSET_NAME }}.zip*
-          tag: ${{ github.ref }}
+          tag: ${{ needs.prepare.outputs.tag_name || github.ref }}
           file_glob: true
